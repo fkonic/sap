@@ -1,0 +1,393 @@
+---
+title: "Mjerenje uspješnosti mirovinskih fondova u RH"
+author:
+- "Filip Konić"
+- "Bartol Rod"
+- "Branko Topalović"
+date: "`r format(Sys.time(), '%d. %B, %Y.')`"
+output:
+  html_document: default
+  pdf_document: default
+subtitle: SAP - projekt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(data.table)
+library(openxlsx)
+library(rvest)
+```
+# Priprema podataka
+```{r}
+#this chunk results in dataframes with Date and numeric columns
+#open all
+crobis <- read.xlsx("../data/CROBIStr.xlsx", detectDates = T)
+ersteA <- read.csv2("../data/Erste Plavi A.csv", stringsAsFactors = F)
+ersteC <- read.csv2("../data/Erste Plavi C.csv", stringsAsFactors = F)
+raiffA <- read_html("../data/Raiffeisen OMF A.xls") %>% html_node("table") %>% html_table()
+raiffC <- read_html("../data/Raiffeisen OMF C.xls") %>% html_node("table") %>% html_table()
+crobex <- read.xlsx("../data/CROBEXtr.xlsx", detectDates = T)
+PBZA <- read.table("../data/PBZCO OMF A.txt", sep="", header = TRUE, stringsAsFactors = F, dec = ",")
+PBZC <- read.table("../data/PBZCO OMF C.txt", sep="", header = TRUE, stringsAsFactors = F, dec = ",")
+
+#CROBEX
+crobex = crobex[, -c(2, 3, 4, 6, 7)]
+names(crobex) <- c("datum", "crobex.v")
+crobex$datum <- ymd(crobex$datum)
+
+head(crobex)
+
+#CROBIS
+crobis[c(2, 3, 4, 6, 7)] <- NULL
+names(crobis) <- c("datum", "crobis.v")
+head(crobis)
+
+#PBZ
+PBZA <- PBZA[, -c(2, 3)]
+PBZC <- PBZC[, -c(2, 3)]
+
+names(PBZA) <- c("datum", "PBZA.v")
+names(PBZC) <- c("datum", "PBZC.v")
+
+PBZA$datum <- dmy(PBZA$datum)
+PBZC$datum <- dmy(PBZC$datum)
+
+head(PBZA)
+head(PBZC)
+
+#ERSTE
+names(ersteA) <- c("datum", "ersteA.v")
+names(ersteC) <- c("datum", "ersteC.v")
+ersteA[3] <- NULL
+ersteC[3] <- NULL
+ersteA$datum <- ymd(ersteA$datum)
+ersteC$datum <- ymd(ersteC$datum)
+
+head(ersteA)
+head(ersteC)
+
+#Raiffeisen
+names(raiffA) <- c("datum", "raiffA.v")
+names(raiffC) <- c("datum", "raiffC.v")
+raiffA <- raiffA[-c(1, 2),]
+raiffC <- raiffC[-c(1, 2),]
+
+raiffA$datum <- dmy(raiffA$datum)
+raiffC$datum <- dmy(raiffC$datum)
+
+raiffA$raiffA.v <- as.numeric(sub(',', '.', raiffA$raiffA.v, fixed = T))
+raiffC$raiffC.v <- as.numeric(sub(',', '.', raiffC$raiffC.v, fixed = T))
+
+head(raiffA)
+head(raiffC)
+```
+
+```{r single data frame}
+#data.table
+sorted = list(ersteA, ersteC, raiffA, raiffC, PBZA, PBZC, crobex, crobis)
+names(sorted) <- c("ersteA", "ersteC", "raiffA", "raiffC", "PBZA", "PBZC", "crobex", "crobis")
+sorted <- lapply(sorted, function(x) x[order(x$datum),])
+
+fondovi <- list(crobex, crobis, ersteA, ersteC, raiffA, raiffC, PBZA, PBZC) %>% purrr::reduce(inner_join, by = "datum")
+
+#kad se svi fondovi joinaju, TO-DO: promijeniti u min od dataframe$datum
+
+datum.min = min(fondovi$datum)
+datum.max = max(fondovi$datum) 
+
+```
+
+```{r hnb, echo=FALSE}
+#hnb
+hnb <- read.xlsx("../data/h-g8a.xlsx")
+head(hnb)
+hnb <- hnb[-c(1, 2, seq(27, nrow(hnb))), c(1,3)]
+names(hnb) <- c("datum", "prirast")
+
+hnb[hnb=="-"] <- NA
+
+hnb <- hnb %>% mutate(prirast = as.double(prirast) / 100 / 52) %>% mutate(datum = ymd(datum, truncated = 2)) %>% filter(year(datum) >= year(datum.min)) %>% complete(datum = seq.Date(min(datum), datum.max, by="day")) %>% fill(prirast) %>% filter(datum >= datum.min)
+
+fondovi <- hnb %>% right_join(fondovi, by = "datum")
+```
+
+```{r}
+povrat <- function(fond) (fond - shift(fond, 1, type = "lead"))/shift(fond, 1, type = "lead")
+
+fondovi$crobex.povrat <- povrat(fondovi$crobex.v)
+fondovi$crobis.povrat <- povrat(fondovi$crobis.v)
+fondovi$ersteA.povrat <- povrat(fondovi$ersteA.v)
+fondovi$ersteC.povrat <- povrat(fondovi$ersteC.v)
+fondovi$PBZA.povrat <- povrat(fondovi$PBZA.v)
+fondovi$PBZC.povrat <- povrat(fondovi$PBZC.v)
+fondovi$raiffA.povrat <- povrat(fondovi$raiffA.v)
+fondovi$raiffC.povrat <- povrat(fondovi$raiffC.v)
+
+```
+
+```{r}
+#subsetting
+fondovi <- fondovi[order(fondovi$datum),]
+fondovi <- fondovi %>% group_by(datum = cut(datum, "week")) %>% slice(n()) %>% ungroup()
+fondovi$datum <- as.Date(fondovi$datum)
+```
+
+Skupove podataka o performansama fondova smo učitali u zasebne data frameove koristeći funkcije učitavanja poput `read.csv2()` i `read.xlsx()`. Potom se iz data frameova odbacilo suvišne stupce, ostavljajući samo datume i vrijednosti te se pretvorilo datume u `Date` format. Sve se data frameove sortiralo po datumima te joinalo koristeći `purrr::reduce`. Za učitavanje HNB data framea potrebno je bilo pretvoriti nepostojeće vrijednosti iz `-` u `NA`, a zatim se pristupilo proširivanju podataka o godišnjima kamatnim stopama na sve datume koristeći funkcije iz paketa `dplyr`. Za sve stupce za koje to ima smisla izračunat je povrat. Potom se data frame sa svim potrebnim podacima uzorkovao na tjednoj bazi.
+
+# Analiza podataka
+
+## Erste
+```{r}
+#exploratory stats Erste
+summary(fondovi$ersteA.povrat)
+summary(fondovi$ersteC.povrat)
+IQR(fondovi$ersteA.povrat, na.rm = T)
+IQR(fondovi$ersteC.povrat, na.rm = T)
+sd(fondovi$ersteA.povrat, na.rm = T)
+sd(fondovi$ersteC.povrat, na.rm = T)
+```
+Iz osnovnih deskriptivnih statistika Erste fondova, zaključujemo da su dnevni povrati između `r min(fondovi$ersteA.povrat)*100` i `r max(fondovi$ersteA.povrat)*100` posto za fond kategorije A te između `r min(fondovi$ersteC.povrat)*100` i `r max(fondovi$ersteC.povrat)*100` posto za fond kategorije C. Iz statistika ranga, IRQ, kao i standardnih devijacija potvrđuje se da je A fond rizičniji od C fonda. S obzirom da je srednji prirast veći za A fond, rizik se isplati.
+
+```{r erste}
+#exporatory graphs Erste
+hist(fondovi$ersteC.povrat, breaks = seq(-0.02, 0.01, 0.001), col=rgb(0,1,0,0.5), xlab = "vrijednosti", main = "Histogram povrata Erste fondova")
+hist(fondovi$ersteA.povrat, breaks = seq(-0.02, 0.01, 0.001), add=T, col = rgb(1,0,0,0.5))
+
+legend('topright', c("Erste A", "Erste C"), fill = c(rgb(1,0,0,0.5), rgb(0,1,0,0.5)))
+
+plot(fondovi$datum, fondovi$ersteA.povrat, type="l", main = "Erste mirovinski fondovi", xlab = "Vrijeme", ylab = "Dnevni prirast", xaxt = "n")
+lines(fondovi$datum, fondovi$ersteA.povrat, col="red")
+lines(fondovi$datum, fondovi$ersteC.povrat, col="blue")
+kvartali = seq(datum.min, datum.max , by = "3 months")
+axis(1, at = kvartali, labels = paste("Q", quarter(kvartali), " ", year(kvartali), sep =""), las = 2)
+legend('bottomright', c("Erste A", "Erste C"), fill=c("red", "blue"))
+```
+Iz histograma i grafova povrata u vremenu možemo potvrditi da je A fond rizičniji od C fonda jer ima širi raspon povrata. Zanimljivo je da se većina povrata Erste C fonda nalazi između -0.1 i 0.1 posto, dok je Erste A fond imao dnevne padove i do 2 posto u 2016. godini.
+
+## PBZ
+```{r}
+summary(fondovi$PBZA.povrat)
+summary(fondovi$PBZC.povrat)
+mean(fondovi$PBZA.povrat, na.rm = T)
+mean(fondovi$PBZC.povrat, na.rm = T)
+IQR(fondovi$PBZA.povrat, na.rm = T)
+IQR(fondovi$PBZC.povrat, na.rm = T)
+sd(fondovi$PBZA.povrat, na.rm = T)
+sd(fondovi$PBZC.povrat, na.rm = T)
+```
+Iz osnovnih deskriptivnih statistika PBZ fondova, zaključujemo da su dnevni povrati između `r min(fondovi$PBZA.povrat)*100` i `r max(fondovi$PBZA.povrat)*100` posto za fond kategorije A te između `r min(fondovi$PBZC.povrat)*100` i `r max(fondovi$PBZC.povrat)*100` posto za fond kategorije C. Iz statistika ranga, IRQ, kao i standardnih devijacija potvrđuje se da je A fond rizičniji od C fonda.
+```{r}
+boxplot(fondovi$PBZA.povrat, fondovi$PBZC.povrat, names = c("PBZA", "PBZC"))
+
+plot(fondovi$datum, fondovi$PBZA.povrat, type="l", xlab = "Vrijeme", ylab = "Povrat", main = "PBZ mirovinski fondovi")
+lines(fondovi$datum, fondovi$PBZA.povrat, col="red")
+lines(fondovi$datum, fondovi$PBZC.povrat, col="blue")
+legend("bottomleft", c("PBZ A", "PBZ C"), fill=c("red", "blue"))
+
+t.test(fondovi$PBZA.povrat, fondovi$PBZC.povrat, alternative = "g",paired = TRUE)
+```
+Grafički prikaz fondova PBZ banke pokazuje kako je fond A rizičniji pošto se u vremenu pokazao mnogo nestabilnijim od C fonda te uočavamo puno veće oscilacije povrata. Isto tako iz boxplota lijepo uočavamo razlike raspršenosti fondova, tj. fonda A ima veću raspršenost od fonda C što je i očekivano.
+
+## Raiffeisen
+```{r}
+summary(fondovi$raiffA.povrat)
+summary(fondovi$raiffC.povrat)
+mean(fondovi$raiffA.povrat, na.rm = T)
+mean(fondovi$raiffC.povrat, na.rm = T)
+IQR(fondovi$raiffA.povrat, na.rm = T)
+IQR(fondovi$raiffC.povrat, na.rm = T)
+sd(fondovi$raiffA.povrat, na.rm = T)
+sd(fondovi$raiffC.povrat, na.rm = T)
+```
+Iz osnovnih deskriptivnih statistika Raiffeisenovih fondova, zaključujemo da su dnevni povrati između `r min(fondovi$raiffA.povrat)*100`% i `r max(fondovi$raiffA.povrat)*100`% za fond kategorije A te između `r min(fondovi$raiffC.povrat)*100`% i `r max(fondovi$raiffC.povrat)*100`% za fond kategorije C. Iz statistika ranga, IRQ, kao i standardnih devijacija možemo uvidjeti kako je A fond rizičniji u odnosu na fond kategorije C.
+
+```{r}
+boxplot(fondovi$raiffA.povrat, fondovi$raiffC.povrat, names = c("Raiffeisen A", "Raiffeisen C"), main = "Boxplot Raiffeisenovih mirovinskih fondova" )
+
+var.test(fondovi$raiffA.povrat, fondovi$raiffC.povrat, alternative = "g")
+
+t.test(fondovi$raiffA.povrat, fondovi$raiffC.povrat, alternative = "g", paired = T)
+```
+Iz boxplota možemo uočiti glavna relativna svojstva kategorija fonda, naime izraženiju raspršenost kategorije A u odnosu na kategoriju C. Također, grafički se uočava bliskost srednjih vrijednosti tih povrata.
+Koristeći F-test odbacujemo nul hipotezu kako su varijance fondova kategorije A i kategorije C jednaki u korist hipoteze kako je varijanca fonda kategorije A veći od varijance fonda kategorije C. Nadalje, koristeći Welchov t-test pokazujemo kako, s podacima kojima raspolažemo, ne možemo odbaciti nul hipotezu da su srednje vrijednosti povrata kategorija fondova jednake u korist hipoteze kako je srednja vrijednost fonda kategorije A veći (p = 0.4038).
+
+
+```{r}
+plot(fondovi$datum, fondovi$raiffA.povrat, type="l", xlab = "Vrijeme", ylab = "Povrat", main = "Raiffeisenovi mirovinski fondovi")
+lines(fondovi$datum, fondovi$raiffA.povrat, col="red")
+lines(fondovi$datum, fondovi$raiffC.povrat, col="blue")
+legend("bottomleft", c("Raiffeisen A", "Raiffeisen C"), fill=c("red", "blue"))
+```
+
+## Međusobna usporedba
+```{r}
+boxplot(fondovi$ersteA.povrat, fondovi$PBZA.povrat, fondovi$raiffA.povrat, names = c("Erste A", "PBZ A", "Raiffeisen A"))
+
+t.test(fondovi$ersteA.povrat, fondovi$PBZA.povrat, paired = T)
+t.test(fondovi$ersteA.povrat, fondovi$raiffA.povrat, paired = T)
+t.test(fondovi$PBZA.povrat, fondovi$raiffA.povrat, paired = T)
+
+
+var.test(fondovi$ersteA.povrat, fondovi$PBZA.povrat, paired = T)
+var.test(fondovi$ersteA.povrat, fondovi$raiffA.povrat, paired = T)
+var.test(fondovi$PBZA.povrat, fondovi$raiffA.povrat, paired = T)
+
+boxplot(fondovi$ersteC.povrat, fondovi$PBZC.povrat, fondovi$raiffC.povrat, names = c("Erste C", "PBZ C", "Raiffeisen C"))
+
+t.test(fondovi$ersteC.povrat, fondovi$PBZC.povrat, paired = T)
+t.test(fondovi$ersteC.povrat, fondovi$raiffC.povrat, paired = T)
+t.test(fondovi$PBZC.povrat, fondovi$raiffC.povrat, paired = T)
+
+var.test(fondovi$ersteC.povrat, fondovi$PBZC.povrat, paired = T)
+var.test(fondovi$ersteC.povrat, fondovi$raiffC.povrat, paired = T)
+var.test(fondovi$PBZC.povrat, fondovi$raiffC.povrat, paired = T)
+```
+Boxplotom mirovinskih fondova kategorije A možemo uočiti kako su srednje vrijednosti i IQR podudarni. Welchovim t-testom po parovima mirovinskih fondova ne možemo tvrditi značajnu razliku između njihovih srednjih vrijednosti uz nivo značajnosti od 0.05.
+Nadalje, F-testovima po parovima mirovinskih fondova, također, ne možemo tvrditi značajnu razliku između njihovih varijanci uz nivo značajnosti od 0.05.
+Slično uočavamo za mirovinske fondove kategorije C koji, također, imaju bliske srednje vrijednosti i IQR. Welchovim t-testom po parovima mirovinskih fondova ne možemo tvrditi značajnu razliku između njihovih srednjih vrijednosti uz razinu značajnosti od 0.05.
+F-testovima po parovima mirovinskih fondova, također, ne možemo tvrditi značajnu razliku između njihovih varijanci uz razinu značajnosti od 0.05
+
+
+# Linearna regresija - CAPM
+CAPM (_Capital Asset Pricing Model_) model opisuje odnose između danog portfolija i referentnog portfolija (CROBEX) u odnosu na bezrizično ulaganje u državne obveznice. 
+Osim toga, koristimo i prošireni CAPM model u kojem koristimo i referentne obveznice (CROBIS).
+## Erste
+```{r erste A}
+portfolio <- fondovi$ersteA.povrat - fondovi$prirast
+referent <- fondovi$crobex.povrat - fondovi$prirast
+
+fit = lm(portfolio ~ referent)
+qqnorm(rstandard(fit))
+qqline(rstandard(fit))
+ks.test(rstandard(fit),'pnorm')
+
+plot(referent, portfolio, main = "CAPM Erste A", xlab = "Prinos ref portfelja", ylab = "Prinos Erste A")
+lines(referent, fit$fitted.values, col = "red")
+summary(fit)
+CAPM = function(referent, coeff)
+  return(coeff[[1]] + coeff[[2]] * referent)
+plot(fondovi$datum, fondovi$ersteA.povrat, type='l', main = "Erste A model", xlab = "vrijeme", ylab = "povrat")
+lines(fondovi$datum, CAPM(referent, fit$coefficients) + fondovi$prirast, col = "red")
+
+fit = lm(portfolio ~ referent + fondovi$crobis.povrat)
+summary(fit)
+qqnorm(rstandard(fit))
+qqline(rstandard(fit))
+ks.test(rstandard(fit),'pnorm')
+
+CAPM2 = function(referent, bond, coeff)
+  return(coeff[[1]] + coeff[[2]] * referent + coeff[[3]] * bond)
+
+plot(fondovi$datum, fondovi$ersteA.povrat, type='l', main = "Erste A prošireni model", xlab = "vrijeme", ylab = "povrat")
+lines(fondovi$datum, CAPM2(referent, fondovi$crobis.povrat, fit$coefficients) + fondovi$prirast, col = "red")
+```
+QQ-plotovi reziduala CAPM modela za osnovni i prilagođeni model su _heavy-tailed_, te Kolmogorov-Smirnovljevi testovi ukazuju da se reziduali statistički značajno mogu smatrati normalnim.
+U CAPM modelu Erste A fonda povrat značajno ovisi o referentnom povratu, pokazujući da je povrat fonda uvelike odrđen tržišnim kretanjima. Međutim, $R^2$ nije velik, ovakav model ne može u potpunosti opisati kretanje povrata fonda. 
+U prilagođenom modelu koji uključuje i obveznički indeks CROBIS, referentni povrat je i dalje najznačajniji faktor. Zbog manjeg RSE i nešto veće $R^2$ statistike, možemo reći da ovaj model bolje opisuje povrate fonda, iako samo marginalno bolje.
+
+```{r erste C}
+portfolio <- fondovi$ersteC.povrat - fondovi$prirast
+referent <- fondovi$crobex.povrat - fondovi$prirast
+
+fit = lm(portfolio ~ referent)
+summary(fit)
+
+plot(fondovi$datum, portfolio, main = "CAPM Erste C", xlab = "Prinos ref portfelja", ylab = "Prinos Erste C")
+lines(referent, fit$fitted.values, col = "red")
+
+plot(fondovi$datum, fondovi$ersteA.povrat, type='l', main = "Erste C model", xlab = "vrijeme", ylab = "povrat")
+lines(fondovi$datum, CAPM(referent, fit$coefficients) + fondovi$prirast, col = "red")
+
+fit = lm(portfolio ~ referent + fondovi$crobis.povrat)
+summary(fit)
+
+CAPM2 = function(referent, bond, coeff)
+  return(coeff[[1]] + coeff[[2]] * referent + coeff[[3]] * bond)
+
+plot(fondovi$datum, fondovi$ersteA.povrat, type='l', main = "Erste A prošireni model", xlab = "vrijeme", ylab = "povrat")
+lines(fondovi$datum, CAPM2(referent, fondovi$crobis.povrat, fit$coefficients) + fondovi$prirast, col = "red")
+#lines(referent, fit$fitted.values, col = "red")
+```
+QQ-plotovi reziduala CAPM modela za osnovni i prilagođeni model su _heavy-tailed_, te Kolmogorov-Smirnovljevi testovi ukazuju da se reziduali statistički značajno mogu smatrati normalnim.
+Za CAPM model Erste C fonda iz $R^2$ statistike zaključujemo da model loše opisuje varijabilnost podataka, kao što F-statistika rezultira p-vrijednosti od 0.747, zbog čega ne možemo zaključiti da model značajno dobro predviđa ponašanje povrata fonda. U modelu, kretanje tržišta nije značajna varijabla, što bismo i očekivali s obzirom da C fond ne ulaže u rizičnije instrumente poput dionica.
+Za prošireni model iz manjeg RSE i većeg $R^2$ možemo reći da bolje opisuje varijabilnost, ali ne značajno bolje. Iz F-statistike i pripadne p-vrijednosti reda -6, možemo reći da prošireni model značajno opisuje ponašanje fonda u odnosu na konstantnu srednju vrijednost. On značajno ovisi o povratu CROBIS obvezničkog indeksa, što i očekujemo s obzirom da fondovi C kategorije ulažu u manje rizične instrumente poput obaveznica.
+
+## PBZ
+```{r}
+#PBZA 
+portfolio = fondovi$PBZA.povrat - fondovi$prirast
+referent = fondovi$crobex.povrat - fondovi$prirast
+
+fit = lm(portfolio~referent, data=fondovi)
+summary(fit)
+
+plot(referent, portfolio, xlab = "Prinos tržišnog (referentnog) portfelja", ylab = "Prinos PBZ A", main = "CAPM PBZ A mirovinskog fonda")
+lines(referent, fit$fitted.values, col = "red")
+legend("topleft", "CAPM", fill = "red")
+
+fit = lm(portfolio ~ referent + fondovi$crobis.povrat)
+summary(fit)
+
+```
+
+```{r}
+#PBZC 
+portfolio = fondovi$PBZC.povrat - fondovi$prirast
+referent = fondovi$crobex.povrat - fondovi$prirast
+
+fit = lm(portfolio~referent, data=fondovi)
+summary(fit)
+
+plot(referent, portfolio, xlab = "Prinos tržišnog (referentnog) portfelja", ylab = "Prinos PBZ C", main = "CAPM PBZ C mirovinskog fonda")
+lines(referent, fit$fitted.values, col = "red")
+legend("topleft", "CAPM", fill = "red")
+
+fit = lm(portfolio ~ referent + fondovi$crobis.povrat)
+
+summary(fit)
+```
+Modelom CAPM otvrđujemo značajnu vezu između PBZ A fonda i referentnog tržišnog portfelja. Nadalje, prošireni model koji u uzima i povrat na referentni portfelj državnih obveznica na prikazuje kako je povrat državnih obveznica manje značajan u odnosu na tržišni portfelj.
+
+Suprotno kategoriji A fonda, PBZ C fond se modelom CAPM ne može signifikantno objasniti te je prema F-testu jednako dobar modelu bez neovisnih varijabli (p = 0.5538). Proširenim modelom utvrđujemo kako postoji značajan odnos između povrata portfelja i povrat referentnog portfelja državnih obveznica. 
+
+## Raiffeisen
+```{r}
+portfolio <- fondovi$raiffA.povrat - fondovi$prirast
+referent <- fondovi$crobex.povrat - fondovi$prirast
+
+fit = lm(portfolio ~ referent)
+summary(fit)
+
+plot(referent, portfolio, xlab = "Prinos tržišnog (referentnog) portfelja", ylab = "Prinos Raiffeisen A", main = "CAPM Raiffeisen A mirovinskog fonda")
+lines(referent, fit$fitted.values, col = "red")
+legend("topleft", "CAPM", fill = "red")
+
+
+fit = lm(portfolio ~ referent + fondovi$crobis.povrat)
+summary(fit)
+
+
+portfolio <- fondovi$raiffC.povrat - fondovi$prirast
+
+fit = lm(portfolio ~ referent)
+summary(fit)
+
+plot(referent, portfolio, xlab = "Prinos tržišnog (referentnog) portfelja", ylab = "Prinos Raiffeisen C", main = "CAPM Raiffeisen C mirovinskog fonda")
+lines(referent, fit$fitted.values, col = "red")
+legend("topleft", "CAPM", fill = "red")
+
+fit = lm(portfolio ~ referent + fondovi$crobis.povrat)
+summary(fit)
+```
+Prema modelu povrata CAPM Raiffeisen A fonda, utvrđujemo značajnu vezu s povratom referentnog tržišnog portfelja. F-statistikom utvrđujemo kako je model signifikantan u odnosu na model bez neovisnih varijabli.
+Prošireni model koji dodatno obuhvaća povrat na referentni portfelj državnih obveznica nam prikazuje kako je upravo taj povrat državnih obveznica manje značajan u odnosu na tržišni portfelj, iako i dalje značajan uz razinu signifikantnosti od 5%. Povećanjem $R^2$ utvrđujemo kako je ovaj prošireni model bolje prilagođen na dostupne podatke. Ovakvu razliku u signifikantnosti između regresora proširenog modela možemo tumačiti prema tome što rizičniji fond koristi rizičnije tržište dionica više kako bi postigao veće povrate.
+
+U odnosu na fond kategorije A, Raiffeisen C se modelom CAPM ne može signifikantno objasniti te je jednako dobar modelu bez neovisnih varijabli prema F-testu (p = 0.7907).
+Međutim, proširenim modelom utvrđujemo kako postoji značajan odnos između povrata portfelja i povrata referentnog portfelja državnih obveznica. Ovakve rezultate možemo tumačiti time da se fond kategorije C, upravo u nastojanju bezrizičnosti, u najvećoj mjeri ravna prema referentnom obvezničkom portfelju, to jeste ulaganjem u državne obveznice kao manje rizičnom instrumentu ulaganja.
+
+# Zaključak
+
+Odabiremo PBZ C jer je njegova vrijednost koeficijenta $\alpha$ veći od ostalih koeficijenata koje smo izračunali.
